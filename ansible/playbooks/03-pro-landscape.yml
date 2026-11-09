@@ -1,0 +1,149 @@
+---
+# Enroll existing MicroCloud node VMs in Ubuntu Pro and Canonical Landscape SaaS.
+# This intentionally does NOT touch LXD, MicroCeph, MicroOVN, snaps, or reboots.
+- name: Register Ubuntu MicroCloud hosts with Pro and Landscape SaaS
+  hosts: microcloud_nodes
+  gather_facts: true
+  become: true
+  serial: 1
+
+  tasks:
+    - name: Require an Ubuntu LTS guest
+      ansible.builtin.assert:
+        that:
+          - ansible_facts.distribution == 'Ubuntu'
+          - (ansible_facts.distribution_major_version | int) >= 24
+        fail_msg: "This playbook is only for supported Ubuntu LTS guest nodes, not the Debian physical host."
+
+    - name: Require an existing Landscape SaaS account name
+      ansible.builtin.assert:
+        that:
+          - (landscape_account_name | default('') | length) > 0
+          - landscape_account_name != 'YOUR_LANDSCAPE_ACCOUNT_NAME'
+        fail_msg: "Set landscape_account_name in an encrypted external Ansible Vault vars file."
+
+    - name: Inspect Ubuntu Pro status without changing anything
+      ansible.builtin.command:
+        argv: [pro, status, --format=json]
+      register: pro_before
+      changed_when: false
+      check_mode: false
+
+    - name: Parse Pro enrollment state
+      ansible.builtin.set_fact:
+        pro_before_json: "{{ pro_before.stdout | from_json }}"
+
+    - name: Ensure a Pro subscription token is provided if this guest is unattached
+      ansible.builtin.assert:
+        that:
+          - (ubuntu_pro_token | default('') | length) > 0
+          - ubuntu_pro_token != 'YOUR_UBUNTU_PRO_TOKEN'
+        fail_msg: "This host is unattached. Supply ubuntu_pro_token in an encrypted external Ansible Vault vars file."
+        quiet: true
+      when:
+        - not (pro_before_json.attached | bool)
+        - not ansible_check_mode
+      no_log: true
+
+    - name: Attach Ubuntu Pro using a short-lived root-only config file
+      when:
+        - not (pro_before_json.attached | bool)
+        - not ansible_check_mode
+      block:
+        - name: Allocate a private temporary file on the guest
+          ansible.builtin.tempfile:
+            state: file
+            prefix: microcloud-pro-
+            suffix: .yaml
+          register: pro_attach_temp
+          no_log: true
+
+        - name: Transfer the Pro token in a protected attach config
+          ansible.builtin.copy:
+            dest: "{{ pro_attach_temp.path }}"
+            content: "{{ {'token': ubuntu_pro_token, 'enable_services': []} | to_nice_yaml }}"
+            owner: root
+            group: root
+            mode: '0600'
+          no_log: true
+
+        - name: Attach Pro without placing a token on the command line
+          ansible.builtin.command:
+            argv:
+              - pro
+              - attach
+              - --attach-config
+              - "{{ pro_attach_temp.path }}"
+          no_log: true
+
+      always:
+        - name: Remove the temporary Pro token file, even on failure
+          ansible.builtin.file:
+            path: "{{ pro_attach_temp.path }}"
+            state: absent
+          when: pro_attach_temp.path is defined
+          no_log: true
+
+    - name: Refresh Pro status after optional attachment
+      ansible.builtin.command:
+        argv: [pro, status, --format=json]
+      register: pro_after
+      changed_when: false
+      check_mode: false
+
+    - name: Parse updated Pro service state
+      ansible.builtin.set_fact:
+        pro_after_json: "{{ pro_after.stdout | from_json }}"
+
+    - name: Require the machine to have an attached Pro subscription
+      ansible.builtin.assert:
+        that:
+          - pro_after_json.attached | bool
+        fail_msg: "Ubuntu Pro did not report attached; stop before attempting Landscape."
+      when: not ansible_check_mode
+
+    - name: Enable and request Landscape SaaS registration when not yet enabled
+      ansible.builtin.command:
+        argv:
+          - pro
+          - enable
+          - landscape
+          - --assume-yes
+          - --
+          - --account-name
+          - "{{ landscape_account_name }}"
+          - --computer-title
+          - "{{ inventory_hostname }}"
+      when:
+        - not ansible_check_mode
+        - >-
+          (pro_after_json.services |
+           selectattr('name', 'equalto', 'landscape') |
+           map(attribute='status') | first | default('disabled')) != 'enabled'
+
+    - name: Check Landscape client service
+      ansible.builtin.command:
+        argv: [systemctl, is-active, landscape-client]
+      register: landscape_client_state
+      changed_when: false
+      check_mode: false
+      when: not ansible_check_mode
+
+    - name: Require the Landscape client service to be running
+      ansible.builtin.assert:
+        that:
+          - landscape_client_state.stdout | trim == 'active'
+        fail_msg: "Landscape client is not active; inspect the client logs before continuing."
+      when: not ansible_check_mode
+
+    - name: Summarize enrollment without displaying secrets
+      ansible.builtin.debug:
+        msg: >-
+          {{ inventory_hostname }}: Pro attached and Landscape client active;
+          approve/verify this computer in the Landscape SaaS dashboard.
+      when: not ansible_check_mode
+
+    - name: Explain check mode
+      ansible.builtin.debug:
+        msg: "Check mode: registration and Pro attach deliberately skipped."
+      when: ansible_check_mode

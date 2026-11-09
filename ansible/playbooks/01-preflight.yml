@@ -1,0 +1,139 @@
+---
+- name: Read-only acceptance checks on the three provisioned Ubuntu VMs
+  hosts: microcloud_nodes
+  gather_facts: true
+  become: false
+  serial: 1
+
+  tasks:
+    - name: Verify Ubuntu release and unique hostname
+      ansible.builtin.assert:
+        that:
+          - ansible_facts['distribution'] == 'Ubuntu'
+          - ansible_facts['distribution_version'] == microcloud_os_version
+          - ansible_facts['hostname'] == inventory_hostname
+        fail_msg: "Unexpected host identity or Ubuntu version on {{ inventory_hostname }}"
+
+    - name: Read management IPv4 configuration
+      ansible.builtin.command:
+        argv: [ip, '-4', -o, addr, show, dev, mgmt0]
+      register: mgmt_address
+      changed_when: false
+      check_mode: false
+
+    - name: Confirm the assigned static management IPv4 address
+      ansible.builtin.assert:
+        that:
+          - (ansible_host ~ '/' ~ microcloud_mgmt_prefix) in mgmt_address.stdout
+        fail_msg: "mgmt0 on {{ inventory_hostname }} does not show {{ ansible_host }}/{{ microcloud_mgmt_prefix }}"
+
+    - name: Inspect uplink0 IPv4 addresses
+      ansible.builtin.command:
+        argv: [ip, '-4', -o, addr, show, dev, uplink0]
+      register: uplink_address
+      changed_when: false
+      check_mode: false
+
+    - name: Ensure uplink0 has no IPv4 address before OVN setup
+      ansible.builtin.assert:
+        that:
+          - (uplink_address.stdout | trim) == ''
+        fail_msg: "uplink0 unexpectedly has an IPv4 address"
+
+    - name: Check that the two dedicated data disks have no partitions
+      ansible.builtin.command:
+        argv: [lsblk, -nro, NAME, "/dev/{{ item }}"]
+      loop: [vdb, vdc]
+      register: disk_partition_check
+      changed_when: false
+      check_mode: false
+
+    - name: Assert dedicated disks are partition-free
+      ansible.builtin.assert:
+        that:
+          - (item.stdout | trim) == item.item
+        fail_msg: "Disk /dev/{{ item.item }} is not an empty whole disk; do not run pre-cluster initialization."
+      loop: "{{ disk_partition_check.results }}"
+      loop_control:
+        label: "/dev/{{ item.item }}"
+
+    - name: Check dedicated data disks for filesystem signatures
+      ansible.builtin.command:
+        argv: [lsblk, -dnro, FSTYPE, "/dev/{{ item }}"]
+      loop: [vdb, vdc]
+      register: disk_fs_check
+      changed_when: false
+      check_mode: false
+
+    - name: Assert dedicated disks have no filesystem
+      ansible.builtin.assert:
+        that:
+          - (item.stdout | trim) == ''
+        fail_msg: "Disk /dev/{{ item.item }} has a filesystem signature; stop rather than overwrite it."
+      loop: "{{ disk_fs_check.results }}"
+      loop_control:
+        label: "/dev/{{ item.item }}"
+
+    - name: Check nested KVM device exposure
+      ansible.builtin.stat:
+        path: /dev/kvm
+      register: nested_kvm
+
+    - name: Confirm nested KVM device is present
+      ansible.builtin.assert:
+        that:
+          - nested_kvm.stat.exists
+          - nested_kvm.stat.ischr
+        fail_msg: "Nested /dev/kvm device is missing or invalid"
+
+    - name: Read NTP synchronized state
+      ansible.builtin.command:
+        argv: [timedatectl, show, --property=NTPSynchronized, --value]
+      register: ntp_state
+      changed_when: false
+      check_mode: false
+
+    - name: Confirm synchronized guest time
+      ansible.builtin.assert:
+        that:
+          - (ntp_state.stdout | trim) == 'yes'
+
+    - name: Check HTTPS connectivity
+      ansible.builtin.command:
+        argv: [curl, -fsSI, --max-time, '15', 'https://ubuntu.com/']
+      changed_when: false
+      check_mode: false
+
+    - name: Check Snap Store connectivity
+      ansible.builtin.command:
+        argv: [snap, debug, connectivity]
+      register: store_check
+      changed_when: false
+      check_mode: false
+
+    - name: Confirm Snap Store PASS
+      ansible.builtin.assert:
+        that:
+          - "'PASS' in store_check.stdout"
+
+    - name: Verify unicast reachability to other MicroCloud guests
+      ansible.builtin.command:
+        argv:
+          - ping
+          - -n
+          - -I
+          - mgmt0
+          - -c
+          - '2'
+          - -W
+          - '2'
+          - "{{ hostvars[item]['ansible_host'] }}"
+      loop: "{{ groups['microcloud_nodes'] | difference([inventory_hostname]) }}"
+      loop_control:
+        label: "{{ inventory_hostname }} -> {{ item }}"
+      changed_when: false
+      check_mode: false
+
+    - name: Report host preflight result
+      ansible.builtin.debug:
+        msg: "{{ inventory_hostname }} accepted: Ubuntu, management IP, unnumbered uplink, blank disks, /dev/kvm, NTP, HTTPS, Snap Store and peer ICMP."

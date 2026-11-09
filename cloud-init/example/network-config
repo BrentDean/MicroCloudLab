@@ -1,0 +1,24 @@
+# Example only. Adapt MACs, gateway, and network addresses to your host.
+version: 2
+ethernets:
+  mgmt0:
+    match:
+      macaddress: "52:54:00:20:30:11"
+    set-name: mgmt0
+    dhcp4: false
+    dhcp6: false
+    addresses: [10.203.10.11/24]
+    routes:
+      - to: default
+        via: 10.203.10.1
+    nameservers:
+      addresses: [10.203.10.1]
+  uplink0:
+    match:
+      macaddress: "52:54:00:20:31:11"
+    set-name: uplink0
+    dhcp4: false
+    dhcp6: false
+    accept-ra: false
+    link-local: []
+    optional: true

@@ -1,0 +1,144 @@
+---
+- name: Install and audit compatible MicroCloud snaps without initializing the cluster
+  hosts: microcloud_nodes
+  gather_facts: false
+  become: true
+  serial: 1
+
+  tasks:
+    - name: Confirm Ansible can use sudo on the guest
+      ansible.builtin.command:
+        argv: [id, -u]
+      register: sudo_uid
+      changed_when: false
+      check_mode: false
+
+    - name: Require root privileges for snap operations
+      ansible.builtin.assert:
+        that:
+          - (sudo_uid.stdout | trim) == '0'
+
+    - name: Read current state for each required snap
+      ansible.builtin.command:
+        argv: [snap, list, "{{ item.name }}"]
+      loop: "{{ microcloud_snaps }}"
+      loop_control:
+        label: "{{ item.name }}"
+      register: installed_before
+      failed_when: false
+      changed_when: false
+      check_mode: false
+
+    - name: Fail safely if an installed snap has the wrong channel or revision
+      ansible.builtin.assert:
+        that:
+          - (item.stdout_lines | length) >= 2
+          - item.stdout_lines[-1].split()[0] == item.item.name
+          - item.stdout_lines[-1].split()[1] == item.item.version
+          - item.stdout_lines[-1].split()[2] == item.item.revision
+          - item.stdout_lines[-1].split()[3] == item.item.channel
+        fail_msg: "Preinstalled {{ item.item.name }} differs from the approved revision/track. No automatic refresh or downgrade will be attempted."
+      when: item.rc == 0
+      loop: "{{ installed_before.results }}"
+      loop_control:
+        label: "{{ item.item.name }}"
+
+    - name: Install only missing snaps from the approved channel and new cohort
+      ansible.builtin.command:
+        argv:
+          - snap
+          - install
+          - "{{ item.item.name }}"
+          - "--channel={{ item.item.channel }}"
+          - "--cohort=+"
+      when:
+        - not ansible_check_mode
+        - item.rc != 0
+      loop: "{{ installed_before.results }}"
+      loop_control:
+        label: "{{ item.item.name }}"
+
+    - name: Read versions after installation
+      ansible.builtin.command:
+        argv: [snap, list, "{{ item.name }}"]
+      register: installed_after
+      loop: "{{ microcloud_snaps }}"
+      loop_control:
+        label: "{{ item.name }}"
+      changed_when: false
+      check_mode: false
+      when: not ansible_check_mode
+
+    - name: Refuse unapproved installed versions, channels or missing cohort
+      ansible.builtin.assert:
+        that:
+          - item.rc == 0
+          - (item.stdout_lines | length) >= 2
+          - item.stdout_lines[-1].split()[0] == item.item.name
+          - item.stdout_lines[-1].split()[1] == item.item.version
+          - item.stdout_lines[-1].split()[2] == item.item.revision
+          - item.stdout_lines[-1].split()[3] == item.item.channel
+          - "'in-cohort' in item.stdout_lines[-1].split()[-1].split(',')"
+        fail_msg: "Snap {{ item.item.name }} does not match the approved release, revision, channel or cohort state."
+      loop: "{{ installed_after.results | default([]) }}"
+      loop_control:
+        label: "{{ item.item.name }}"
+      when: not ansible_check_mode
+
+    - name: Initialize the automatic-refresh hold check
+      ansible.builtin.set_fact:
+        microcloud_hold_needed: false
+      when: not ansible_check_mode
+
+    - name: Detect unheld MicroCloud snaps
+      ansible.builtin.set_fact:
+        microcloud_hold_needed: true
+      loop: "{{ installed_after.results | default([]) }}"
+      loop_control:
+        label: "{{ item.item.name }}"
+      when:
+        - not ansible_check_mode
+        - "'held' not in item.stdout_lines[-1].split()[-1].split(',')"
+
+    - name: Indefinitely hold automatic refreshes only if needed
+      ansible.builtin.command:
+        argv: [snap, refresh, --hold, lxd, microceph, microovn, microcloud]
+      when:
+        - not ansible_check_mode
+        - microcloud_hold_needed | bool
+
+    - name: Read final snap inventory
+      ansible.builtin.command:
+        argv: [snap, list, "{{ item.name }}"]
+      loop: "{{ microcloud_snaps }}"
+      loop_control:
+        label: "{{ item.name }}"
+      register: installed_final
+      changed_when: false
+      check_mode: false
+      when: not ansible_check_mode
+
+    - name: Require the four snaps to be held on matching approved revisions
+      ansible.builtin.assert:
+        that:
+          - item.rc == 0
+          - item.stdout_lines[-1].split()[1] == item.item.version
+          - item.stdout_lines[-1].split()[2] == item.item.revision
+          - item.stdout_lines[-1].split()[3] == item.item.channel
+          - "'in-cohort' in item.stdout_lines[-1].split()[-1].split(',')"
+          - "'held' in item.stdout_lines[-1].split()[-1].split(',')"
+        fail_msg: "Final check failed for {{ item.item.name }}: revisions, tracking or update hold drifted."
+      loop: "{{ installed_final.results | default([]) }}"
+      loop_control:
+        label: "{{ item.item.name }}"
+      when: not ansible_check_mode
+
+    - name: Summarize accepted snap state
+      ansible.builtin.debug:
+        msg: "{{ inventory_hostname }}: LXD, MicroCeph, MicroOVN and MicroCloud at the approved revisions, in-cohort and held indefinitely."
+      when: not ansible_check_mode
+
+    - name: Explain check-mode behavior
+      ansible.builtin.debug:
+        msg: "Check mode: only existing installed snaps were audited; install and hold tasks were skipped."
+      when: ansible_check_mode

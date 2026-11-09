@@ -1,0 +1,27 @@
+---
+# SSH key paths stay on the operator's machine, not in repository variables.
+# Use SSH agent/config or set ANSIBLE_PRIVATE_KEY_FILE locally as needed.
+ansible_user: ubuntu
+
+# First acceptance snapshot of MicroCloud 3.4.1 on Ubuntu 26.04 LTS.
+# Revisions are deliberate safety pins, not a promise they remain current forever.
+microcloud_os_version: "26.04"
+microcloud_mgmt_prefix: "24"
+
+microcloud_snaps:
+  - name: lxd
+    channel: 6/stable
+    version: 6.10.1-f5c750d
+    revision: "41228"
+  - name: microceph
+    channel: tentacle/stable
+    version: 20.2.1+snap2ff1e996db
+    revision: "1904"
+  - name: microovn
+    channel: 26.03/stable
+    version: 26.03.0-2+snape488de8de3
+    revision: "1193"
+  - name: microcloud
+    channel: 3/stable
+    version: 3.4.1-2c3a8bb
+    revision: "2564"

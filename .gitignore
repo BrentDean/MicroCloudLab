@@ -1,0 +1,35 @@
+# Runtime VM data and generated storage images
+*.qcow2
+*.img
+*.raw
+*.iso
+*.vmdk
+*.vdi
+*.seed
+
+# Never version local cloud-init output or active machine credentials
+/cloud-init/micro*/
+/cloud-init/generated/
+*.pem
+*.key
+*.p12
+*.pfx
+*id_ed25519*
+*id_rsa*
+*.token
+.env
+.env.*
+secrets/
+vault*.yml
+vault*.yaml
+*-vault.yml
+*-vault.yaml
+
+# Local logs, build outputs and backup material
+*.log
+*.bak
+*.sqlite
+*.db
+*.tar
+*.tar.gz
+*.tgz

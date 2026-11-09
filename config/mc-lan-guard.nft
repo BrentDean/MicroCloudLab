@@ -1,0 +1,13 @@
+# MicroCloud lab isolation guard - Debian physical host, NOT guest.
+# Only touches inet mc_lan_guard. Keep Ubuntu/MicroCloud and public internet routable.
+# Idempotent reload: create the table if missing; replace only its rules.
+# Do not replace this with 'flush ruleset' on a host running UFW/libvirt/Docker/Tailscale.
+table inet mc_lan_guard
+flush table inet mc_lan_guard
+
+table inet mc_lan_guard {
+    chain forward {
+        type filter hook forward priority -10; policy accept;
+        iifname { "virbr90", "virbr91" } ip daddr 192.168.4.0/22 counter drop
+    }
+}
